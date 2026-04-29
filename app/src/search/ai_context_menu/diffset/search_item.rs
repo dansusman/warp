@@ -24,6 +24,7 @@ impl DiffSetSearchItem {
             DiffMode::MainBranch => "Changes vs. main branch".to_string(),
             DiffMode::OtherBranch(branch) => format!("Changes vs. {branch}"),
             DiffMode::GitButlerWorkspace => "GitButler workspace".to_string(),
+            DiffMode::GitButlerStack { name, .. } => format!("GitButler stack: {name}"),
         }
     }
 
@@ -34,6 +35,9 @@ impl DiffSetSearchItem {
             DiffMode::OtherBranch(branch) => format!("All changes compared to {branch}"),
             DiffMode::GitButlerWorkspace => {
                 "All uncommitted changes across GitButler virtual branches".to_string()
+            }
+            DiffMode::GitButlerStack { name, .. } => {
+                format!("Committed and uncommitted changes for GitButler stack {name}")
             }
         }
     }

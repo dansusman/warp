@@ -5829,6 +5829,7 @@ impl TerminalView {
                 .map(|m| DiffBase::BranchName(m.main_branch_name.clone()))
                 .unwrap_or(DiffBase::UncommittedChanges),
             DiffMode::OtherBranch(branch_name) => DiffBase::BranchName(branch_name.clone()),
+            DiffMode::GitButlerStack { name, .. } => DiffBase::BranchName(name.clone()),
         };
 
         // Create attachment reference and key using the shared function

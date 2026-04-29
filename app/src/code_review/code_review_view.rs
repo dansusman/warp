@@ -639,11 +639,22 @@ impl FileInvalidationState {
     }
 }
 
+/// (stack_cli_id, top_branch_name) for one applied GitButler stack.
+#[derive(Debug, Clone)]
+pub(crate) struct GitButlerStackEntry {
+    pub stack_cli_id: String,
+    pub name: String,
+}
+
 /// Per-repository state container.
 struct RepositoryState {
     repo_path: PathBuf,
     state: CodeReviewViewState,
     available_branches: Vec<(String, bool)>, // (branch_name, is_main_branch)
+    /// Applied GitButler stacks for this repo. Empty when the repo isn't a
+    /// GitButler workspace or the feature flag is off; populated asynchronously
+    /// alongside `available_branches`.
+    gitbutler_stacks: Vec<GitButlerStackEntry>,
 
     /// Whether a file has been explicitly expanded (true) or collapsed (false).
     file_expanded: HashMap<PathBuf, bool>,
@@ -660,6 +671,7 @@ impl RepositoryState {
             repo_path,
             state: CodeReviewViewState::None,
             available_branches: Vec::new(),
+            gitbutler_stacks: Vec::new(),
             file_expanded: HashMap::new(),
             pending_file_updates: None,
             file_invalidation: FileInvalidationState::new(queue),
@@ -1571,6 +1583,7 @@ impl CodeReviewView {
         let Some(repo_path) = self.repo_path().cloned() else {
             return;
         };
+        self.fetch_gitbutler_stacks(repo_path.clone(), ctx);
         let fetched_repo_path = repo_path.clone();
         ctx.spawn(
             async move {
@@ -1621,6 +1634,52 @@ impl CodeReviewView {
         );
     }
 
+    fn fetch_gitbutler_stacks(&mut self, repo_path: PathBuf, ctx: &mut ViewContext<Self>) {
+        if !FeatureFlag::GitButlerCodeReview.is_enabled() {
+            return;
+        }
+        if !super::gitbutler::is_gitbutler_workspace(&repo_path) {
+            return;
+        }
+        let fetched_repo_path = repo_path.clone();
+        ctx.spawn(
+            async move { super::gitbutler::fetch_status(&repo_path).await },
+            move |me, status_result, ctx| {
+                if me.repo_path() != Some(&fetched_repo_path) {
+                    return;
+                }
+                let Some(repo) = me.active_repo.as_mut() else {
+                    return;
+                };
+                repo.gitbutler_stacks = match status_result {
+                    Ok(status) => status
+                        .stacks
+                        .into_iter()
+                        .map(|stack| {
+                            // Top branch (first in the list) names the stack
+                            // for display; fall back to the cli_id when a
+                            // stack has no branches yet.
+                            let name = stack
+                                .branches
+                                .first()
+                                .map(|b| b.name.clone())
+                                .unwrap_or_else(|| stack.cli_id.clone());
+                            GitButlerStackEntry {
+                                stack_cli_id: stack.cli_id,
+                                name,
+                            }
+                        })
+                        .collect(),
+                    Err(err) => {
+                        log::warn!("Failed to fetch GitButler stacks: {err}");
+                        Vec::new()
+                    }
+                };
+                me.update_diff_selector_selection(ctx);
+            },
+        );
+    }
+
     pub(crate) fn build_diff_targets(&self, ctx: &ViewContext<Self>) -> Vec<DiffTarget> {
         let Some(repo) = self.active_repo.as_ref() else {
             return Vec::new();
@@ -1639,9 +1698,11 @@ impl CodeReviewView {
             matches!(current_mode, DiffMode::Head),
         ));
 
-        // 1a. GitButler workspace, when detected and the flag is on. Sits next
-        // to "Uncommitted changes" because in a virtual-branch workspace the
-        // working tree spans every applied lane.
+        // 1a. GitButler workspace + per-stack entries, when detected and the
+        // flag is on. Workspace sits next to "Uncommitted changes" because in
+        // a virtual-branch workspace the working tree spans every applied
+        // lane; stacks follow it so the GitButler-specific options stay
+        // grouped at the top of the list.
         if FeatureFlag::GitButlerCodeReview.is_enabled()
             && super::gitbutler::is_gitbutler_workspace(&repo.repo_path)
         {
@@ -1650,6 +1711,21 @@ impl CodeReviewView {
                 DiffMode::GitButlerWorkspace,
                 matches!(current_mode, DiffMode::GitButlerWorkspace),
             ));
+            for entry in &repo.gitbutler_stacks {
+                let is_selected = matches!(
+                    &current_mode,
+                    DiffMode::GitButlerStack { stack_cli_id, .. }
+                        if stack_cli_id == &entry.stack_cli_id
+                );
+                targets.push(DiffTarget::new(
+                    entry.name.clone(),
+                    DiffMode::GitButlerStack {
+                        stack_cli_id: entry.stack_cli_id.clone(),
+                        name: entry.name.clone(),
+                    },
+                    is_selected,
+                ));
+            }
         }
 
         // 2. If the current mode targets a branch not in the local branch
@@ -1692,7 +1768,10 @@ impl CodeReviewView {
             }
             let is_selected = match &current_mode {
                 DiffMode::OtherBranch(name) => name == branch_name,
-                DiffMode::Head | DiffMode::MainBranch | DiffMode::GitButlerWorkspace => false,
+                DiffMode::Head
+                | DiffMode::MainBranch
+                | DiffMode::GitButlerWorkspace
+                | DiffMode::GitButlerStack { .. } => false,
             };
             targets.push(DiffTarget::new(
                 branch_name.clone(),
@@ -6333,6 +6412,7 @@ impl CodeReviewView {
                 }
             }
             DiffMode::OtherBranch(branch_name) => Ok(DiffBase::BranchName(branch_name)),
+            DiffMode::GitButlerStack { name, .. } => Ok(DiffBase::BranchName(name)),
         }
     }
 
@@ -6481,6 +6561,7 @@ impl CodeReviewView {
                         }
                     }
                     DiffMode::OtherBranch(branch_name) => DiffBase::BranchName(branch_name),
+                    DiffMode::GitButlerStack { name, .. } => DiffBase::BranchName(name),
                 };
 
                 send_telemetry_from_ctx!(
@@ -7551,6 +7632,9 @@ impl TypedActionView for CodeReviewView {
                         DiffMode::OtherBranch(branch) => {
                             DiscardOperationType::FileChangesAgainstBranch(Some(branch))
                         }
+                        DiffMode::GitButlerStack { name, .. } => {
+                            DiscardOperationType::FileChangesAgainstBranch(Some(name))
+                        }
                     };
                 } else {
                     // All files remove
@@ -7561,6 +7645,9 @@ impl TypedActionView for CodeReviewView {
                         DiffMode::MainBranch => DiscardOperationType::AllChangesAgainstBranch(None),
                         DiffMode::OtherBranch(branch) => {
                             DiscardOperationType::AllChangesAgainstBranch(Some(branch))
+                        }
+                        DiffMode::GitButlerStack { name, .. } => {
+                            DiscardOperationType::AllChangesAgainstBranch(Some(name))
                         }
                     };
 

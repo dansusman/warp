@@ -5,7 +5,7 @@
 //! diffs are wired into `DiffStateModel::load_diffs_for_repo` in commit 2/3;
 //! lane attribution metadata lands in commit 4.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{anyhow, Result};
@@ -16,7 +16,7 @@ use serde::Deserialize;
 /// file alone is not enough — without `but` we can't fetch lane data.
 #[cfg(feature = "local_fs")]
 pub fn is_gitbutler_workspace(repo_path: &Path) -> bool {
-    has_gitbutler_state(repo_path) && but_cli_available()
+    has_gitbutler_state(repo_path) && but_cli_path().is_some()
 }
 
 #[cfg(not(feature = "local_fs"))]
@@ -29,32 +29,52 @@ fn has_gitbutler_state(repo_path: &Path) -> bool {
     repo_path.join(".git").join("gitbutler").join("but.sqlite").exists()
 }
 
-/// Whether the `but` CLI exists on `PATH`. Cached after first check; PATH
-/// changes during a session are uncommon and not worth re-scanning per render.
-fn but_cli_available() -> bool {
-    static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| which_on_path("but"))
+/// Resolved path to the `but` CLI, or None if not found. Cached after first
+/// lookup; PATH changes during a session are uncommon and we want a stable
+/// path to pass to `Command::new` (GUI-launched apps don't inherit the
+/// user's shell PATH on macOS).
+fn but_cli_path() -> Option<&'static PathBuf> {
+    static CACHED: OnceLock<Option<PathBuf>> = OnceLock::new();
+    CACHED.get_or_init(|| which_on_path("but")).as_ref()
 }
 
-fn which_on_path(name: &str) -> bool {
-    let Ok(path) = std::env::var("PATH") else {
-        return false;
-    };
-    for dir in std::env::split_paths(&path) {
+fn which_on_path(name: &str) -> Option<PathBuf> {
+    // Check $PATH first, then a fallback list of common bin dirs that GUI-
+    // launched macOS apps don't inherit (Finder/`open` strips PATH down to
+    // the system minimum, so user-installed CLIs in homebrew or ~/.local/bin
+    // are invisible without this).
+    let path_dirs = std::env::var("PATH")
+        .ok()
+        .into_iter()
+        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>());
+    let home = std::env::var("HOME").ok().map(std::path::PathBuf::from);
+    let fallback_dirs: Vec<std::path::PathBuf> = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+    ]
+    .iter()
+    .map(std::path::PathBuf::from)
+    .chain(home.into_iter().map(|h| h.join(".local").join("bin")))
+    .collect();
+
+    for dir in path_dirs.chain(fallback_dirs.into_iter()) {
         let candidate = dir.join(name);
         if candidate.is_file() {
-            return true;
+            return Some(candidate);
         }
         #[cfg(windows)]
         {
             for ext in ["exe", "cmd", "bat"] {
-                if candidate.with_extension(ext).is_file() {
-                    return true;
+                let with_ext = candidate.with_extension(ext);
+                if with_ext.is_file() {
+                    return Some(with_ext);
                 }
             }
         }
     }
-    false
+    None
 }
 
 // --- `but` CLI runner ---
@@ -67,8 +87,10 @@ async fn run_but_command(repo_path: &Path, args: &[&str]) -> Result<String> {
     use command::r#async::Command;
     use command::Stdio;
 
+    let but_path = but_cli_path()
+        .ok_or_else(|| anyhow!("`but` CLI not found on PATH or in common bin directories"))?;
     log::debug!("[GIT OPERATION] gitbutler.rs run_but_command but {}", args.join(" "));
-    let output = Command::new("but")
+    let output = Command::new(but_path)
         .args(args)
         .current_dir(repo_path)
         .stdout(Stdio::piped())

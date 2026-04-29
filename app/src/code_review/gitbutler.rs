@@ -123,6 +123,18 @@ pub struct ButStack {
 pub struct ButBranch {
     pub cli_id: String,
     pub name: String,
+    /// Commits belonging to this branch, ordered newest-first. The first entry
+    /// is the branch tip; the parent of the oldest entry is the branch's base
+    /// (either the next-down branch's tip in the stack, or the workspace
+    /// merge base for the bottom branch).
+    #[serde(default)]
+    pub commits: Vec<ButCommit>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ButCommit {
+    pub commit_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

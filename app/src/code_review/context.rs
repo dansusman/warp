@@ -90,6 +90,9 @@ pub fn create_attachment_reference_and_key(
                 DiffMode::GitButlerStack { name, .. } => {
                     format!("diffset for GitButler stack {name}")
                 }
+                DiffMode::GitButlerBranch { label, .. } => {
+                    format!("diffset for GitButler branch {label}")
+                }
             };
             let key = diff_set_description.clone();
             (format!("<change:{key}>"), key)

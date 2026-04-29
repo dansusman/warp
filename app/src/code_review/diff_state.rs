@@ -286,6 +286,17 @@ pub enum DiffMode {
         #[serde(skip_serializing)]
         name: String,
     },
+    /// Show committed changes for a single branch within a GitButler stack
+    /// (between that branch's parent and tip). `label` is `stack › branch`
+    /// and is used for display only.
+    GitButlerBranch {
+        #[serde(skip_serializing)]
+        stack_cli_id: String,
+        #[serde(skip_serializing)]
+        branch_cli_id: String,
+        #[serde(skip_serializing)]
+        label: String,
+    },
 }
 
 impl DiffMode {
@@ -499,7 +510,9 @@ impl DiffStateModel {
             .and_then(|metadata| match &self.mode {
                 DiffMode::Head | DiffMode::GitButlerWorkspace => Some(&metadata.against_head),
                 DiffMode::MainBranch => metadata.against_base_branch.as_ref(),
-                DiffMode::OtherBranch(_) | DiffMode::GitButlerStack { .. } => None, // TODO: implement caching
+                DiffMode::OtherBranch(_)
+                | DiffMode::GitButlerStack { .. }
+                | DiffMode::GitButlerBranch { .. } => None, // TODO: implement caching
             })
     }
 
@@ -647,7 +660,9 @@ impl DiffStateModel {
                 .against_base_branch
                 .as_ref()
                 .map(|base| base.aggregate_stats),
-            DiffMode::OtherBranch(_) | DiffMode::GitButlerStack { .. } => None, // TODO: caching
+            DiffMode::OtherBranch(_)
+            | DiffMode::GitButlerStack { .. }
+            | DiffMode::GitButlerBranch { .. } => None, // TODO: caching
         }
     }
 
@@ -1353,7 +1368,7 @@ impl DiffStateModel {
             DiffMode::Head | DiffMode::GitButlerWorkspace => {
                 anyhow::bail!("merge base is not applicable for Head mode")
             }
-            DiffMode::GitButlerStack { .. } => {
+            DiffMode::GitButlerStack { .. } | DiffMode::GitButlerBranch { .. } => {
                 anyhow::bail!("merge base is computed via `but status` for GitButler stacks")
             }
         };
@@ -1499,6 +1514,18 @@ impl DiffStateModel {
             }
             DiffMode::GitButlerStack { stack_cli_id, .. } => {
                 Self::diff_state_against_gitbutler_stack(&repo_path, &stack_cli_id).await
+            }
+            DiffMode::GitButlerBranch {
+                stack_cli_id,
+                branch_cli_id,
+                ..
+            } => {
+                Self::diff_state_against_gitbutler_branch(
+                    &repo_path,
+                    &stack_cli_id,
+                    &branch_cli_id,
+                )
+                .await
             }
         };
 
@@ -2148,6 +2175,124 @@ impl DiffStateModel {
                 total_deletions += file_diff.file_diff.deletions();
                 files.push(file_diff);
             }
+        }
+
+        Ok(GitDiffWithBaseContent {
+            files_changed: files.len(),
+            files,
+            total_additions,
+            total_deletions,
+        })
+    }
+
+    /// Diff for a single GitButler branch within a stack: `git diff <parent>..<tip>`
+    /// where `tip` is the branch's newest commit and `parent` is the next-down
+    /// branch's tip (or the workspace merge base for the bottom branch).
+    #[cfg(feature = "local_fs")]
+    async fn diff_state_against_gitbutler_branch(
+        repo_path: &Path,
+        stack_cli_id: &str,
+        branch_cli_id: &str,
+    ) -> Result<GitDiffWithBaseContent> {
+        use crate::code_review::gitbutler;
+
+        let status = gitbutler::fetch_status(repo_path).await?;
+        let stack = status
+            .stacks
+            .iter()
+            .find(|s| s.cli_id == stack_cli_id)
+            .ok_or_else(|| anyhow!("GitButler stack {stack_cli_id} not found"))?;
+        let branch_index = stack
+            .branches
+            .iter()
+            .position(|b| b.cli_id == branch_cli_id)
+            .ok_or_else(|| anyhow!("GitButler branch {branch_cli_id} not found"))?;
+        let branch = &stack.branches[branch_index];
+
+        let Some(tip) = branch.commits.first().map(|c| c.commit_id.clone()) else {
+            // Empty branch — nothing to diff.
+            return Ok(GitDiffWithBaseContent {
+                files_changed: 0,
+                files: Vec::new(),
+                total_additions: 0,
+                total_deletions: 0,
+            });
+        };
+        // Parent = next-down branch's tip, or the workspace merge base for the
+        // bottom branch in the stack.
+        let parent = stack
+            .branches
+            .iter()
+            .skip(branch_index + 1)
+            .find_map(|b| b.commits.first().map(|c| c.commit_id.clone()))
+            .or_else(|| status.merge_base.as_ref().map(|m| m.commit_id.clone()))
+            .ok_or_else(|| anyhow!("no parent commit available for GitButler branch"))?;
+
+        let range = format!("{parent}..{tip}");
+
+        let name_status_output =
+            run_git_command(repo_path, &["diff", "--name-status", "-z", &range]).await?;
+        let changed_files = if name_status_output.trim().is_empty() {
+            Vec::new()
+        } else {
+            Self::parse_git_diff_name_status(&name_status_output)?
+        };
+
+        if changed_files.is_empty() {
+            return Ok(GitDiffWithBaseContent {
+                files_changed: 0,
+                files: Vec::new(),
+                total_additions: 0,
+                total_deletions: 0,
+            });
+        }
+
+        let binary_files = Self::get_binary_files_vs_commit(repo_path, &range).await?;
+        let mut files = Vec::new();
+        let mut total_additions = 0;
+        let mut total_deletions = 0;
+
+        for (file_path, status) in changed_files {
+            let is_binary = binary_files.contains(&file_path);
+            // Use the range as the synthetic "merge base" for diff rendering;
+            // pass the parent commit when fetching original file content.
+            let mut file_diff =
+                Self::get_file_diff(repo_path, &file_path, &status, is_binary, Some(&range))
+                    .await?;
+
+            if !is_binary
+                && (file_diff.hunks.is_empty() || file_diff.is_empty())
+                && !status.is_renamed()
+                && !status.is_new_file()
+            {
+                continue;
+            }
+
+            let content_at_base = match &status {
+                GitFileStatus::New | GitFileStatus::Untracked => Some(String::new()),
+                GitFileStatus::Renamed { old_path } => {
+                    Self::get_file_content_at_commit(repo_path, old_path, &parent).await
+                }
+                _ => {
+                    Self::get_file_content_at_commit(
+                        repo_path,
+                        &file_path.to_string_lossy(),
+                        &parent,
+                    )
+                    .await
+                }
+            };
+
+            file_diff.is_autogenerated =
+                super::is_file_autogenerated(&file_path, content_at_base.as_deref());
+
+            total_additions += file_diff.additions();
+            total_deletions += file_diff.deletions();
+
+            files.push(FileDiffAndContent {
+                file_diff,
+                content_at_head: content_at_base,
+            });
         }
 
         Ok(GitDiffWithBaseContent {
@@ -3022,6 +3167,7 @@ impl DiffStateModel {
             DiffMode::OtherBranch(branch) => format!("Changes vs. {branch}"),
             DiffMode::GitButlerWorkspace => "Workspace".to_string(),
             DiffMode::GitButlerStack { name, .. } => name,
+            DiffMode::GitButlerBranch { label, .. } => label,
         }
     }
 

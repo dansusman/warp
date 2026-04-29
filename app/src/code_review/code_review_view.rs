@@ -639,11 +639,19 @@ impl FileInvalidationState {
     }
 }
 
-/// (stack_cli_id, top_branch_name) for one applied GitButler stack.
+/// (cli_id, name) for one branch within a GitButler stack.
+#[derive(Debug, Clone)]
+pub(crate) struct GitButlerBranchEntry {
+    pub cli_id: String,
+    pub name: String,
+}
+
+/// (stack_cli_id, top_branch_name, branches) for one applied GitButler stack.
 #[derive(Debug, Clone)]
 pub(crate) struct GitButlerStackEntry {
     pub stack_cli_id: String,
     pub name: String,
+    pub branches: Vec<GitButlerBranchEntry>,
 }
 
 /// Per-repository state container.
@@ -1664,9 +1672,18 @@ impl CodeReviewView {
                                 .first()
                                 .map(|b| b.name.clone())
                                 .unwrap_or_else(|| stack.cli_id.clone());
+                            let branches = stack
+                                .branches
+                                .into_iter()
+                                .map(|b| GitButlerBranchEntry {
+                                    cli_id: b.cli_id,
+                                    name: b.name,
+                                })
+                                .collect();
                             GitButlerStackEntry {
                                 stack_cli_id: stack.cli_id,
                                 name,
+                                branches,
                             }
                         })
                         .collect(),
@@ -1712,7 +1729,7 @@ impl CodeReviewView {
                 matches!(current_mode, DiffMode::GitButlerWorkspace),
             ));
             for entry in &repo.gitbutler_stacks {
-                let is_selected = matches!(
+                let stack_selected = matches!(
                     &current_mode,
                     DiffMode::GitButlerStack { stack_cli_id, .. }
                         if stack_cli_id == &entry.stack_cli_id
@@ -1723,8 +1740,30 @@ impl CodeReviewView {
                         stack_cli_id: entry.stack_cli_id.clone(),
                         name: entry.name.clone(),
                     },
-                    is_selected,
+                    stack_selected,
                 ));
+
+                // Per-branch rows only for stacks with more than one branch —
+                // a single-branch stack's diff is identical to the stack row.
+                if entry.branches.len() > 1 {
+                    for branch in &entry.branches {
+                        let label = format!("{} › {}", entry.name, branch.name);
+                        let branch_selected = matches!(
+                            &current_mode,
+                            DiffMode::GitButlerBranch { branch_cli_id, .. }
+                                if branch_cli_id == &branch.cli_id
+                        );
+                        targets.push(DiffTarget::new(
+                            label.clone(),
+                            DiffMode::GitButlerBranch {
+                                stack_cli_id: entry.stack_cli_id.clone(),
+                                branch_cli_id: branch.cli_id.clone(),
+                                label,
+                            },
+                            branch_selected,
+                        ));
+                    }
+                }
             }
         }
 
@@ -1771,7 +1810,8 @@ impl CodeReviewView {
                 DiffMode::Head
                 | DiffMode::MainBranch
                 | DiffMode::GitButlerWorkspace
-                | DiffMode::GitButlerStack { .. } => false,
+                | DiffMode::GitButlerStack { .. }
+                | DiffMode::GitButlerBranch { .. } => false,
             };
             targets.push(DiffTarget::new(
                 branch_name.clone(),
@@ -6413,6 +6453,7 @@ impl CodeReviewView {
             }
             DiffMode::OtherBranch(branch_name) => Ok(DiffBase::BranchName(branch_name)),
             DiffMode::GitButlerStack { name, .. } => Ok(DiffBase::BranchName(name)),
+            DiffMode::GitButlerBranch { label, .. } => Ok(DiffBase::BranchName(label)),
         }
     }
 
@@ -6562,6 +6603,7 @@ impl CodeReviewView {
                     }
                     DiffMode::OtherBranch(branch_name) => DiffBase::BranchName(branch_name),
                     DiffMode::GitButlerStack { name, .. } => DiffBase::BranchName(name),
+                    DiffMode::GitButlerBranch { label, .. } => DiffBase::BranchName(label),
                 };
 
                 send_telemetry_from_ctx!(
@@ -7635,6 +7677,9 @@ impl TypedActionView for CodeReviewView {
                         DiffMode::GitButlerStack { name, .. } => {
                             DiscardOperationType::FileChangesAgainstBranch(Some(name))
                         }
+                        DiffMode::GitButlerBranch { label, .. } => {
+                            DiscardOperationType::FileChangesAgainstBranch(Some(label))
+                        }
                     };
                 } else {
                     // All files remove
@@ -7648,6 +7693,9 @@ impl TypedActionView for CodeReviewView {
                         }
                         DiffMode::GitButlerStack { name, .. } => {
                             DiscardOperationType::AllChangesAgainstBranch(Some(name))
+                        }
+                        DiffMode::GitButlerBranch { label, .. } => {
+                            DiscardOperationType::AllChangesAgainstBranch(Some(label))
                         }
                     };
 

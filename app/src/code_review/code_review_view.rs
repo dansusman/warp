@@ -1639,6 +1639,19 @@ impl CodeReviewView {
             matches!(current_mode, DiffMode::Head),
         ));
 
+        // 1a. GitButler workspace, when detected and the flag is on. Sits next
+        // to "Uncommitted changes" because in a virtual-branch workspace the
+        // working tree spans every applied lane.
+        if FeatureFlag::GitButlerCodeReview.is_enabled()
+            && super::gitbutler::is_gitbutler_workspace(&repo.repo_path)
+        {
+            targets.push(DiffTarget::new(
+                "Workspace",
+                DiffMode::GitButlerWorkspace,
+                matches!(current_mode, DiffMode::GitButlerWorkspace),
+            ));
+        }
+
         // 2. If the current mode targets a branch not in the local branch
         // list, add it after "Uncommitted changes".
         if let DiffMode::OtherBranch(ref branch_name) = current_mode {
@@ -1679,7 +1692,7 @@ impl CodeReviewView {
             }
             let is_selected = match &current_mode {
                 DiffMode::OtherBranch(name) => name == branch_name,
-                DiffMode::Head | DiffMode::MainBranch => false,
+                DiffMode::Head | DiffMode::MainBranch | DiffMode::GitButlerWorkspace => false,
             };
             targets.push(DiffTarget::new(
                 branch_name.clone(),
@@ -6311,7 +6324,7 @@ impl CodeReviewView {
 
     fn get_diff_base(&self, ctx: &ViewContext<Self>) -> anyhow::Result<DiffBase> {
         match self.diff_state_model.as_ref(ctx).diff_mode() {
-            DiffMode::Head => Ok(DiffBase::UncommittedChanges),
+            DiffMode::Head | DiffMode::GitButlerWorkspace => Ok(DiffBase::UncommittedChanges),
             DiffMode::MainBranch => {
                 let main_branch_name = self.diff_state_model.as_ref(ctx).get_main_branch_name();
                 match main_branch_name {
@@ -6451,7 +6464,7 @@ impl CodeReviewView {
                     .diff_state_model
                     .read(ctx, |model, _| model.diff_mode())
                 {
-                    DiffMode::Head => DiffBase::UncommittedChanges,
+                    DiffMode::Head | DiffMode::GitButlerWorkspace => DiffBase::UncommittedChanges,
                     DiffMode::MainBranch => {
                         let main_branch_name = self
                             .diff_state_model
@@ -7529,7 +7542,9 @@ impl TypedActionView for CodeReviewView {
                     // Single file remove
                     self.discard_dialog_state.discard_file_paths = vec![path.clone()];
                     self.discard_dialog_state.operation_type = match current_diff_mode {
-                        DiffMode::Head => DiscardOperationType::FileUncommittedChanges,
+                        DiffMode::Head | DiffMode::GitButlerWorkspace => {
+                            DiscardOperationType::FileUncommittedChanges
+                        }
                         DiffMode::MainBranch => {
                             DiscardOperationType::FileChangesAgainstBranch(None)
                         }
@@ -7540,7 +7555,9 @@ impl TypedActionView for CodeReviewView {
                 } else {
                     // All files remove
                     self.discard_dialog_state.operation_type = match current_diff_mode {
-                        DiffMode::Head => DiscardOperationType::AllUncommittedChanges,
+                        DiffMode::Head | DiffMode::GitButlerWorkspace => {
+                            DiscardOperationType::AllUncommittedChanges
+                        }
                         DiffMode::MainBranch => DiscardOperationType::AllChangesAgainstBranch(None),
                         DiffMode::OtherBranch(branch) => {
                             DiscardOperationType::AllChangesAgainstBranch(Some(branch))

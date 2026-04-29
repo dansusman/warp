@@ -815,6 +815,10 @@ pub enum FeatureFlag {
     /// Enables commit, push, and create-PR actions in the code review panel.
     GitOperationsInCodeReview,
 
+    /// Enables GitButler virtual-branch entries (Workspace, per-stack, per-branch)
+    /// in the code review diff selector when a GitButler workspace is detected.
+    GitButlerCodeReview,
+
     /// Gates the remote control chip and `/remote-control` slash command in the CLI agent footer.
     HOARemoteControl,
 

@@ -18,6 +18,7 @@ pub(crate) mod comment_rendering;
 pub mod comments;
 pub(crate) mod diff_menu;
 pub(crate) mod diff_selector;
+pub(crate) mod gitbutler;
 pub(crate) mod file_invalidation_queue;
 
 use code_review_view::CodeReviewAction;

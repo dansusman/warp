@@ -271,6 +271,12 @@ pub enum DiffMode {
     MainBranch,
     /// Show changes in working directory against an arbitrary branch (git diff $(git merge-base HEAD <branch>))
     OtherBranch(#[serde(skip_serializing)] String),
+    /// Show uncommitted changes across all GitButler virtual-branch lanes.
+    /// Semantically equivalent to `Head` in a GitButler workspace because the
+    /// workspace HEAD commit already contains every applied stack's commits;
+    /// the working tree therefore represents the union of all lanes' uncommitted
+    /// changes.
+    GitButlerWorkspace,
 }
 
 impl DiffMode {
@@ -482,7 +488,7 @@ impl DiffStateModel {
         self.metadata
             .as_ref()
             .and_then(|metadata| match &self.mode {
-                DiffMode::Head => Some(&metadata.against_head),
+                DiffMode::Head | DiffMode::GitButlerWorkspace => Some(&metadata.against_head),
                 DiffMode::MainBranch => metadata.against_base_branch.as_ref(),
                 DiffMode::OtherBranch(_) => None, // TODO: implement caching for arbitrary branches
             })
@@ -625,7 +631,9 @@ impl DiffStateModel {
     pub fn get_stats_for_mode(&self, mode: DiffMode) -> Option<DiffStats> {
         let metadata = self.metadata.as_ref()?;
         match mode {
-            DiffMode::Head => Some(metadata.against_head.aggregate_stats),
+            DiffMode::Head | DiffMode::GitButlerWorkspace => {
+                Some(metadata.against_head.aggregate_stats)
+            }
             DiffMode::MainBranch => metadata
                 .against_base_branch
                 .as_ref()
@@ -1333,7 +1341,7 @@ impl DiffStateModel {
         let branch = match mode {
             DiffMode::MainBranch => detect_main_branch(repo_path).await?,
             DiffMode::OtherBranch(branch) => branch.clone(),
-            DiffMode::Head => {
+            DiffMode::Head | DiffMode::GitButlerWorkspace => {
                 anyhow::bail!("merge base is not applicable for Head mode")
             }
         };
@@ -1467,7 +1475,9 @@ impl DiffStateModel {
         should_fetch_base: bool,
     ) -> DiffsWithBaseContent {
         let diffs = match mode {
-            DiffMode::Head => Self::diff_state_against_head(&repo_path).await,
+            DiffMode::Head | DiffMode::GitButlerWorkspace => {
+                Self::diff_state_against_head(&repo_path).await
+            }
             DiffMode::MainBranch => {
                 Self::diff_state_against_base_branch(&repo_path, should_fetch_base).await
             }
@@ -1749,7 +1759,7 @@ impl DiffStateModel {
         let rel_str = relative.to_str().ok_or_else(|| anyhow!("non-UTF-8 path"))?;
 
         match (mode, merge_base) {
-            (DiffMode::Head, _) => {
+            (DiffMode::Head | DiffMode::GitButlerWorkspace, _) => {
                 log::debug!(
                     "[GIT OPERATION] diff_state.rs file_status_for_path git status -- {rel_str}"
                 );
@@ -1851,7 +1861,7 @@ impl DiffStateModel {
         };
 
         let commit = match mode {
-            DiffMode::Head => "HEAD",
+            DiffMode::Head | DiffMode::GitButlerWorkspace => "HEAD",
             _ => merge_base.unwrap_or("HEAD"),
         };
         let is_binary = Self::is_file_binary(repo_path, file, commit).await?;
@@ -2890,6 +2900,7 @@ impl DiffStateModel {
             DiffMode::Head => self.changes_vs_head_label(),
             DiffMode::MainBranch => self.changes_vs_main_branch_label(),
             DiffMode::OtherBranch(branch) => format!("Changes vs. {branch}"),
+            DiffMode::GitButlerWorkspace => "Workspace".to_string(),
         }
     }
 

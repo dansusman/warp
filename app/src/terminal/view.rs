@@ -5824,7 +5824,7 @@ impl TerminalView {
         let current = current_branch.map(CurrentHead::BranchName);
 
         let base = match &diff_mode {
-            DiffMode::Head => DiffBase::UncommittedChanges,
+            DiffMode::Head | DiffMode::GitButlerWorkspace => DiffBase::UncommittedChanges,
             DiffMode::MainBranch => metadata
                 .map(|m| DiffBase::BranchName(m.main_branch_name.clone()))
                 .unwrap_or(DiffBase::UncommittedChanges),

@@ -86,6 +86,7 @@ pub fn create_attachment_reference_and_key(
                 DiffMode::OtherBranch(branch_name) => {
                     format!("diffset against {branch_name}")
                 }
+                DiffMode::GitButlerWorkspace => "GitButler workspace changes".to_string(),
             };
             let key = diff_set_description.clone();
             (format!("<change:{key}>"), key)

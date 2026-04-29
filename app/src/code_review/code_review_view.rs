@@ -1715,27 +1715,26 @@ impl CodeReviewView {
             matches!(current_mode, DiffMode::Head),
         ));
 
-        // 1a. GitButler workspace + per-stack entries, when detected and the
-        // flag is on. Workspace sits next to "Uncommitted changes" because in
-        // a virtual-branch workspace the working tree spans every applied
-        // lane; stacks follow it so the GitButler-specific options stay
-        // grouped at the top of the list.
+        // 1a. GitButler stacks + per-branch entries, when detected and the
+        // flag is on. Multi-branch stacks render as "Stack: <top branch>"
+        // followed by "↳ <branch>" rows; single-branch stacks render as a
+        // plain branch row (a single-branch "stack" is just a branch).
         if FeatureFlag::GitButlerCodeReview.is_enabled()
             && super::gitbutler::is_gitbutler_workspace(&repo.repo_path)
         {
-            targets.push(DiffTarget::new(
-                "Workspace",
-                DiffMode::GitButlerWorkspace,
-                matches!(current_mode, DiffMode::GitButlerWorkspace),
-            ));
             for entry in &repo.gitbutler_stacks {
                 let stack_selected = matches!(
                     &current_mode,
                     DiffMode::GitButlerStack { stack_cli_id, .. }
                         if stack_cli_id == &entry.stack_cli_id
                 );
+                let stack_label = if entry.branches.len() > 1 {
+                    format!("Stack: {}", entry.name)
+                } else {
+                    entry.name.clone()
+                };
                 targets.push(DiffTarget::new(
-                    entry.name.clone(),
+                    stack_label,
                     DiffMode::GitButlerStack {
                         stack_cli_id: entry.stack_cli_id.clone(),
                         name: entry.name.clone(),
@@ -1747,7 +1746,7 @@ impl CodeReviewView {
                 // a single-branch stack's diff is identical to the stack row.
                 if entry.branches.len() > 1 {
                     for branch in &entry.branches {
-                        let label = format!("{} › {}", entry.name, branch.name);
+                        let label = format!("↳ {}", branch.name);
                         let branch_selected = matches!(
                             &current_mode,
                             DiffMode::GitButlerBranch { branch_cli_id, .. }
@@ -1795,7 +1794,14 @@ impl CodeReviewView {
 
         // 4. Other branches, filtered to exclude main and the currently
         // checked-out branch (the latter is functionally the same as
-        // "Uncommitted changes").
+        // "Uncommitted changes"). Also exclude any branch already surfaced
+        // as a GitButler stack/branch row, since virtual branches are backed
+        // by real git refs and would otherwise appear twice.
+        let gitbutler_branch_names: std::collections::HashSet<&str> = repo
+            .gitbutler_stacks
+            .iter()
+            .flat_map(|stack| stack.branches.iter().map(|b| b.name.as_str()))
+            .collect();
         for (branch_name, is_main) in repo.available_branches.iter() {
             if *is_main {
                 continue;
@@ -1804,6 +1810,9 @@ impl CodeReviewView {
                 if branch_name == current_name {
                     continue;
                 }
+            }
+            if gitbutler_branch_names.contains(branch_name.as_str()) {
+                continue;
             }
             let is_selected = match &current_mode {
                 DiffMode::OtherBranch(name) => name == branch_name,

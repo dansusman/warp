@@ -1725,6 +1725,17 @@ fn initialize_app(
         FeatureFlag::SSHTmuxWrapper.set_user_preference(is_ssh_tmux_wrapper_enabled);
     }
 
+    let is_gitbutler_code_review_enabled = ctx
+        .private_user_preferences()
+        .read_value("GitButlerCodeReviewOverride")
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse().ok());
+
+    if let Some(is_gitbutler_code_review_enabled) = is_gitbutler_code_review_enabled {
+        FeatureFlag::GitButlerCodeReview.set_user_preference(is_gitbutler_code_review_enabled);
+    }
+
     ctx.add_singleton_model(|ctx| AIExecutionProfilesModel::new(launch_mode, ctx));
 
     ctx.add_singleton_model(DefaultTerminal::new);

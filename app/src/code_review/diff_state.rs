@@ -296,6 +296,15 @@ pub enum DiffMode {
         branch_cli_id: String,
         #[serde(skip_serializing)]
         label: String,
+        /// Top branch name of the owning stack — fallback identifier when
+        /// `stack_cli_id` becomes stale (the `but` CLI reassigns ids when the
+        /// workspace state changes).
+        #[serde(skip_serializing)]
+        stack_name: String,
+        /// Branch name within the stack — fallback identifier when
+        /// `branch_cli_id` becomes stale.
+        #[serde(skip_serializing)]
+        branch_name: String,
     },
 }
 
@@ -1512,18 +1521,22 @@ impl DiffStateModel {
                 Self::diff_state_against_specific_branch(&repo_path, branch, should_fetch_base)
                     .await
             }
-            DiffMode::GitButlerStack { stack_cli_id, .. } => {
-                Self::diff_state_against_gitbutler_stack(&repo_path, &stack_cli_id).await
+            DiffMode::GitButlerStack { stack_cli_id, name } => {
+                Self::diff_state_against_gitbutler_stack(&repo_path, &stack_cli_id, &name).await
             }
             DiffMode::GitButlerBranch {
                 stack_cli_id,
                 branch_cli_id,
+                stack_name,
+                branch_name,
                 ..
             } => {
                 Self::diff_state_against_gitbutler_branch(
                     &repo_path,
                     &stack_cli_id,
                     &branch_cli_id,
+                    &stack_name,
+                    &branch_name,
                 )
                 .await
             }
@@ -2088,14 +2101,24 @@ impl DiffStateModel {
     async fn diff_state_against_gitbutler_stack(
         repo_path: &Path,
         stack_cli_id: &str,
+        stack_name: &str,
     ) -> Result<GitDiffWithBaseContent> {
         use crate::code_review::gitbutler;
         use std::collections::HashSet;
 
         let status = gitbutler::fetch_status(repo_path).await?;
-        let Some(stack) = status.stacks.iter().find(|s| s.cli_id == stack_cli_id) else {
-            return Err(anyhow!("GitButler stack {stack_cli_id} not found"));
-        };
+        let stack = status
+            .stacks
+            .iter()
+            .find(|s| s.cli_id == stack_cli_id)
+            .or_else(|| {
+                status
+                    .stacks
+                    .iter()
+                    .find(|s| s.branches.first().map(|b| b.name.as_str()) == Some(stack_name))
+            })
+            .ok_or_else(|| anyhow!("GitButler stack {stack_name:?} not found"))?;
+        let stack_cli_id = stack.cli_id.as_str();
         let Some(merge_base) = status.merge_base.as_ref().map(|m| m.commit_id.clone()) else {
             return Err(anyhow!("GitButler workspace has no merge base"));
         };
@@ -2193,6 +2216,8 @@ impl DiffStateModel {
         repo_path: &Path,
         stack_cli_id: &str,
         branch_cli_id: &str,
+        stack_name: &str,
+        branch_name: &str,
     ) -> Result<GitDiffWithBaseContent> {
         use crate::code_review::gitbutler;
 
@@ -2201,12 +2226,19 @@ impl DiffStateModel {
             .stacks
             .iter()
             .find(|s| s.cli_id == stack_cli_id)
-            .ok_or_else(|| anyhow!("GitButler stack {stack_cli_id} not found"))?;
+            .or_else(|| {
+                status
+                    .stacks
+                    .iter()
+                    .find(|s| s.branches.first().map(|b| b.name.as_str()) == Some(stack_name))
+            })
+            .ok_or_else(|| anyhow!("GitButler stack {stack_name:?} not found"))?;
         let branch_index = stack
             .branches
             .iter()
             .position(|b| b.cli_id == branch_cli_id)
-            .ok_or_else(|| anyhow!("GitButler branch {branch_cli_id} not found"))?;
+            .or_else(|| stack.branches.iter().position(|b| b.name == branch_name))
+            .ok_or_else(|| anyhow!("GitButler branch {branch_name:?} not found"))?;
         let branch = &stack.branches[branch_index];
 
         let Some(tip) = branch.commits.first().map(|c| c.commit_id.clone()) else {

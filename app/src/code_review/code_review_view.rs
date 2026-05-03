@@ -1758,6 +1758,8 @@ impl CodeReviewView {
                                 stack_cli_id: entry.stack_cli_id.clone(),
                                 branch_cli_id: branch.cli_id.clone(),
                                 label,
+                                stack_name: entry.name.clone(),
+                                branch_name: branch.name.clone(),
                             },
                             branch_selected,
                         ));
